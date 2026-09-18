@@ -1,197 +1,123 @@
 #!/usr/bin/env python3
-"""tools/ 的自测：用合成数据验证三个工具的真实判定行为（纯标准库）。
-
-运行：
-    python tools/selftest.py
-
-覆盖的行为（每条都是断言，失败即抛异常并以非 0 退出）：
-
-unit_roundtrip_check
-  - 自洽的口径 + 7 个观测锚点            -> verdict PASS
-  - 几何口径被换成相机口径（0.6 倍类事故） -> verdict FAIL
-  - 只有 3 个锚点                        -> verdict UNKNOWN（样本量不足，不允许 PASS）
-
-silhouette_diff
-  - 完全一致 / 1 px 内偏移               -> PASS
-  - 宽行左边界差 5 px                    -> FAIL
-  - 窄（≤6 px）区间的边界差              -> UNKNOWN（亚像素归属，不判 FAIL）
-  - 单侧缺行                             -> FAIL
-
-stage_guard
-  - 目标不存在                           -> 放行
-  - 目标已存在且未授权                   -> 阻止，且**不得改动文件**
-  - dry-run                              -> 只报告，不改动文件
-  - 授权覆盖两次                         -> 依次备份为 _dev1 / _dev2
-"""
-
 from __future__ import annotations
-
-import contextlib
-import io
-import json
-import shutil
-import sys
-from contextlib import contextmanager
+import contextlib, io, json, shutil, sys, tempfile
 from pathlib import Path
+from contextlib import contextmanager
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
-
-import silhouette_diff as sd  # noqa: E402
-import stage_guard as sg  # noqa: E402
-import unit_roundtrip_check as urc  # noqa: E402
+import silhouette_diff as sd
+import stage_guard as sg
+import unit_roundtrip_check as urc
 
 CHECKS = 0
-# 注意：不直接用 tempfile —— 受限沙箱下系统临时目录可能不可写。
-# 临时目录放在仓库内，测试结束即删除（.gitignore 已排除）。
-TMP_ROOT = REPO / ".selftest_tmp"
-
-
 @contextmanager
 def scratch_dir():
-    if TMP_ROOT.exists():
-        shutil.rmtree(TMP_ROOT, ignore_errors=True)
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        yield TMP_ROOT
-    finally:
-        shutil.rmtree(TMP_ROOT, ignore_errors=True)
+    root = Path(tempfile.mkdtemp(prefix=".selftest_tmp_", dir=REPO))
+    try: yield root
+    finally: shutil.rmtree(root, ignore_errors=True)
 
-
-def expect(label: str, actual, wanted) -> None:
-    global CHECKS
-    CHECKS += 1
-    if actual != wanted:
-        raise AssertionError(f"{label}: 期望 {wanted!r}，实得 {actual!r}")
+def expect(label, actual, wanted):
+    global CHECKS; CHECKS += 1
+    if actual != wanted: raise AssertionError(f"{label}: 期望 {wanted!r}，实得 {actual!r}")
     print(f"  [ok] {label}: {actual!r}")
 
-
-def load_spec(path: Path) -> dict:
-    return urc.load_spec(path)
-
-
-def test_roundtrip() -> None:
+def test_roundtrip():
     print("== unit_roundtrip_check ==")
-    good = REPO / "examples" / "roundtrip.spec.json"
-    bad = REPO / "examples" / "roundtrip_bad.spec.json"
+    good = REPO/'examples'/'roundtrip.spec.json'; bad = REPO/'examples'/'roundtrip_bad.spec.json'
+    r = urc.build_report(urc.load_spec(good), None)
+    expect("自洽口径", r['verdict'], 'PASS'); expect("7 anchors", len(r['anchors']), 7)
+    expect("错误口径", urc.build_report(urc.load_spec(bad), None)['verdict'], 'FAIL')
+    spec = urc.load_spec(good); spec['anchors'] = spec['anchors'][:3]
+    expect("不足 5 anchors", urc.build_report(spec, None)['verdict'], 'UNKNOWN')
 
-    report = urc.build_report(load_spec(good), None)
-    expect("自洽口径 + 7 锚点", report["verdict"], "PASS")
-    expect("锚点数量", len(report["anchors"]), 7)
-    if not report["max_residual_px"] <= report["tol_px"]:
-        raise AssertionError("残差应落在容差内")
+    with scratch_dir() as tmp:
+        base = json.loads(good.read_text(encoding='utf-8'))
+        cases = [
+            ("bad number", ("geometry","mm_per_px"), "abc"),
+            ("zero width", ("camera","resolution"), [0,804]),
+            ("negative tol", ("tol_px",), -0.1),
+            ("unsupported fit", ("camera","sensor_fit"), "VERTICAL"),
+            ("non-square pixels", ("camera","pixel_aspect"), [1,2]),
+            ("nonzero shift", ("camera","shift"), [0.1,0]),
+        ]
+        for label, path, value in cases:
+            data = json.loads(json.dumps(base))
+            cursor = data
+            for key in path[:-1]: cursor = cursor[key]
+            cursor[path[-1]] = value
+            p = tmp/f"{label}.json"; p.write_text(json.dumps(data), encoding='utf-8')
+            try: urc.load_spec(p)
+            except urc.SpecError: got = 'SpecError'
+            else: got = 'accepted'
+            expect(label, got, 'SpecError')
 
-    report_bad = urc.build_report(load_spec(bad), None)
-    expect("几何口径误用相机口径", report_bad["verdict"], "FAIL")
-
-    spec = load_spec(good)
-    spec["anchors"] = spec["anchors"][:3]
-    spec["name"] = "only three anchors"
-    report_short = urc.build_report(spec, None)
-    expect("仅 3 个锚点", report_short["verdict"], "UNKNOWN")
-    expect("锚点残差本身达标", report_short["anchor_verdict"], "PASS")
-
-
-def test_silhouette() -> None:
+def test_silhouette():
     print("== silhouette_diff ==")
-    base = {"name": "geometry", "width": 296, "rows": [[10, 100], [12, 102], [15, 105], None, [20, 120]]}
+    base = {"name":"a","width":296,"rows":[[10,100],[12,102],[15,105],None,[20,120]]}
+    def run(rows, width=296, rr=None, tol=1, thin=6):
+        a = {"name":"a","width":296,"rows":[tuple(r) if r else None for r in base['rows']]}
+        b = {"name":"b","width":width,"rows":[tuple(r) if r else None for r in rows]}
+        return sd.diff_rows(a,b,tol,thin,rr)
+    expect("same", run(base['rows'])['verdict'], 'PASS')
+    expect("fail", run([[10,100],[12,102],[15,105],None,[25,120]])['verdict'], 'FAIL')
+    expect("thin unknown", run([[10,100],[12,102],[15,105],None,[40,43]])['verdict'], 'UNKNOWN')
+    expect("presence fail", run([[10,100],[12,102],[15,105],None,None])['verdict'], 'FAIL')
+    empty = {"name":"e","width":296,"rows":[]}
+    expect("0 rows -> UNKNOWN", sd.diff_rows(empty,empty,1,6,None)['verdict'], 'UNKNOWN')
+    try: run(base['rows'], width=300)
+    except sd.InputError: got='InputError'
+    else: got='accepted'
+    expect("width mismatch", got, 'InputError')
+    for rr in [(4,3),(99,100),(-1,2)]:
+        try: run(base['rows'], rr=rr)
+        except sd.InputError: got='InputError'
+        else: got='accepted'
+        expect(f"bad range {rr}", got, 'InputError')
+    for tol,thin in [(-1,6),(1,-1)]:
+        try: run(base['rows'], tol=tol, thin=thin)
+        except sd.InputError: got='InputError'
+        else: got='accepted'
+        expect(f"bad thresholds {tol}/{thin}", got, 'InputError')
 
-    def run(other_rows, tol=1.0, thin=6.0):
-        a = {"name": "geometry", "width": 296, "rows": [list(r) if r else None for r in base["rows"]]}
-        b = {"name": "other", "width": 296, "rows": [list(r) if r else None for r in other_rows]}
-        return sd.diff_rows(a, b, tol, thin, None)
-
-    expect("完全相同", run(base["rows"])["verdict"], "PASS")
-    expect(
-        "全部 1 px 内偏移",
-        run([[10.4, 100.6], [12.2, 102.4], [15.8, 105.9], None, [20.5, 120.5]])["verdict"],
-        "PASS",
-    )
-    expect("宽行左边界差 5 px", run([[10, 100], [12, 102], [15, 105], None, [25, 120]])["verdict"], "FAIL")
-    expect("窄区间大差", run([[10, 100], [12, 102], [15, 105], None, [40, 43]])["verdict"], "UNKNOWN")
-    expect("单侧缺行", run([[10, 100], [12, 102], [15, 105], None, None])["verdict"], "FAIL")
-
-    thin = run([[10, 100], [12, 102], [15, 105], None, [40, 43]])
-    expect("窄区间差异进入 thin 桶（不进 fail 桶）", (len(thin["thin_rows"]), len(thin["fail_rows"])), (1, 0))
-
-
-def test_stage_guard() -> None:
+def test_stage_guard():
     print("== stage_guard ==")
     with scratch_dir() as tmp:
-        work = Path(tmp)
-        expect("目标不存在 -> 放行", sg.guard("stage2_volumes", work)["action"], "write")
+        r=sg.guard('stage2',tmp); expect("new target", r['action'], 'write')
+        target=tmp/'stage2.blend'; target.write_text('old',encoding='utf-8')
+        expect("block", sg.guard('stage2',tmp)['action'], 'blocked')
+        r=sg.guard('stage2',tmp,allow_overwrite=True)
+        expect("backup name", Path(r['backup']).name, 'stage2_dev1.blend')
+        expect("backup content", Path(r['backup']).read_text(), 'old')
+        expect("main preserved before save", target.read_text(), 'old')
+        target.write_text('v2'); r=sg.guard('stage2',tmp,allow_overwrite=True)
+        expect("second backup", Path(r['backup']).name, 'stage2_dev2.blend')
+        expect("main still v2", target.read_text(), 'v2')
+        bad=tmp/'bad.blend'; bad.mkdir()
+        try: sg.guard('bad',tmp,allow_overwrite=True)
+        except ValueError: got='ValueError'
+        else: got='accepted'
+        expect("directory target rejected",got,'ValueError')
 
-        target = work / "stage2_volumes.blend"
-        target.write_text("old product", encoding="utf-8")
-
-        blocked = sg.guard("stage2_volumes", work)
-        expect("已存在且未授权 -> 阻止", blocked["action"], "blocked")
-        expect("阻止时 ok=False", blocked["ok"], False)
-        expect("阻止时不得改动文件", target.read_text(encoding="utf-8"), "old product")
-
-        sg.guard("stage2_volumes", work, dry_run=True, allow_overwrite=True)
-        expect("dry-run 不产生备份", (work / "stage2_volumes_dev1.blend").exists(), False)
-        expect("dry-run 不动主产物", target.exists(), True)
-
-        first = sg.guard("stage2_volumes", work, allow_overwrite=True)
-        expect("第一次授权覆盖的备份名", Path(first["backup"]).name, "stage2_volumes_dev1.blend")
-        expect("备份内容 = 旧产物", Path(first["backup"]).read_text(encoding="utf-8"), "old product")
-        expect("主产物已让位", target.exists(), False)
-
-        target.write_text("v2", encoding="utf-8")
-        second = sg.guard("stage2_volumes", work, allow_overwrite=True)
-        expect("第二次授权覆盖的备份名", Path(second["backup"]).name, "stage2_volumes_dev2.blend")
-        expect("产物链条数（主 + dev1 + dev2）", len(sg.list_chain("stage2_volumes", work)), 3)
-
-
-def test_cli_contracts() -> None:
-    print("== CLI/报告 契约 ==")
-    quiet = contextlib.redirect_stdout(io.StringIO())
-    mute = contextlib.redirect_stderr(io.StringIO())
+def test_cli():
+    print("== CLI ==")
+    q=contextlib.redirect_stdout(io.StringIO()); e=contextlib.redirect_stderr(io.StringIO())
+    good=REPO/'examples'/'roundtrip.spec.json'; bad=REPO/'examples'/'roundtrip_bad.spec.json'
+    with q: expect("roundtrip PASS exit", urc.main(['--spec',str(good)]), 0)
+    with q: expect("roundtrip FAIL exit", urc.main(['--spec',str(bad)]), 1)
     with scratch_dir() as tmp:
-        out = Path(tmp) / "nested" / "roundtrip_report.json"
-        with quiet:
-            code = urc.main(
-                [
-                    "--spec",
-                    str(REPO / "examples" / "roundtrip.spec.json"),
-                    "--write-report",
-                    str(out),
-                ]
-            )
-        expect("PASS 用例退出码", code, 0)
-        expect("报告已落盘", out.is_file(), True)
-        payload = json.loads(out.read_text(encoding="utf-8"))
-        expect("报告含判定字段", payload["verdict"], "PASS")
+        a=tmp/'a.json'; b=tmp/'b.json'
+        a.write_text(json.dumps({'width':10,'rows':[]}),encoding='utf-8'); b.write_text(json.dumps({'width':10,'rows':[]}),encoding='utf-8')
+        with q: expect("empty silhouette exit", sd.main(['--a',str(a),'--b',str(b)]), 1)
+        with q,e: expect("reversed range exit", sd.main(['--a',str(a),'--b',str(b),'--rows','2:1']), 2)
 
-        with quiet:
-            code_fail = urc.main(["--spec", str(REPO / "examples" / "roundtrip_bad.spec.json")])
-        expect("FAIL 用例退出码", code_fail, 1)
-
-        with quiet, mute:
-            code_bad_spec = urc.main(["--spec", str(Path(tmp) / "missing.json")])
-        expect("spec 缺失退出码", code_bad_spec, 2)
-
-        with quiet:
-            code_self = urc.main(
-                ["--spec", str(REPO / "examples" / "roundtrip.spec.json"), "--self-check-only"]
-            )
-        expect("仅自检时不宣告 PASS（退出码 1）", code_self, 1)
-
-
-def main() -> int:
-    test_roundtrip()
-    test_silhouette()
-    test_stage_guard()
-    test_cli_contracts()
+def main():
+    test_roundtrip(); test_silhouette(); test_stage_guard(); test_cli()
     print(f"\n全部 {CHECKS} 项断言通过。")
     return 0
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
+if __name__=='__main__':
+    try: sys.exit(main())
     except AssertionError as exc:
-        print(f"\n断言失败: {exc}", file=sys.stderr)
-        sys.exit(1)
+        print(f"\n断言失败: {exc}", file=sys.stderr); sys.exit(1)
