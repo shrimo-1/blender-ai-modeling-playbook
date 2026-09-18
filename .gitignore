@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Blender 自动备份与产物（本仓库只放方法/模板/工具，不放模型产物）
+*.blend1
+*.blend2
+*.blend@
+*.stl
+*.obj
+*.fbx
+*.glb
+*.gltf
+*.usd
+*.abc
+
+# 证据与报告的临时产物（如确需随仓库分发，用 `git add -f` 显式加入）
+_scratch*/
+*.tmp
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+.DS_Store
+
+# 自测临时目录（tools/selftest.py 会在仓库内建临时目录）
+.selftest_tmp/
