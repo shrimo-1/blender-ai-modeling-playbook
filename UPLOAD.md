@@ -155,4 +155,4 @@ git log --oneline -1
 2. **没有私密产物**：原始参考图、客户资料、`.blend` / `.stl` 是否确实不该公开；
 3. **许可明确**：`LICENSE` 与 README 的许可说明一致（本仓库默认 MIT）。
 
-需要改许可时，直接替换 `LICENSE` 文件并同步改 README 第 7 节即可。
+需要改许可时，直接替换 `LICENSE` 文件并同步改 README 第 8 节即可。

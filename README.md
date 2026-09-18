@@ -52,7 +52,7 @@
     ├── unit_roundtrip_check.py            # 坐标往返预检（≥5 个独立观测锚点，误差 ≤0.5 源像素）
     ├── silhouette_diff.py                 # 剪影逐行左右边界差分（几何 vs 原画）
     ├── stage_guard.py                     # 阶段 .blend 防覆写守卫
-    └── selftest.py                        # 三个工具的自测（28 项断言，纯标准库）
+    └── selftest.py                        # 三个工具的自测（33 项断言，纯标准库）
 
 全部脚本只依赖 Python 标准库，可直接在任意 3.x 上运行；不需要 Blender 就能跑。
 
@@ -75,11 +75,11 @@ python <repo>\tools\unit_roundtrip_check.py --spec <repo>\examples\roundtrip_bad
 rem 4) 阶段脚本里加守卫，避免覆盖上一阶段产物
 python <repo>\tools\stage_guard.py --stage stage2_volumes --dir .
 
-rem 5) 验证三个工具本身的行为（28 项断言）
+rem 5) 验证三个工具本身的行为（33 项断言）
 python <repo>\tools\selftest.py
 ```
 
-期望结果：第 3 步第一条 `PASS`（退出码 0）、第二条 `FAIL`（退出码 1）；第 5 步打印「全部 28 项断言通过」。
+期望结果：第 3 步第一条 `PASS`（退出码 0）、第二条 `FAIL`（退出码 1）；第 5 步打印「全部 33 项断言通过」。
 `<repo>` 换成你克隆/解压后的实际目录。
 
 三个脚本都可以 `python <script> --help` 看参数。`silhouette_diff.py` 的输入是两份「逐行左右边界」JSON
@@ -87,15 +87,17 @@ python <repo>\tools\selftest.py
 
 ## 5. 验证状态
 
-本仓库的工具不是示意代码，随仓库自带的 `tools/selftest.py` 覆盖了这些真实判定路径（**28 项断言，全部通过**）：
+本仓库的工具不是示意代码，随仓库自带的 `tools/selftest.py` 覆盖了这些真实判定路径（**33 项断言，全部通过**）：
 
 - 自洽口径 + 7 个观测锚点 → `PASS`；几何口径误用相机口径 → `FAIL`；锚点不足 5 个 → `UNKNOWN`（不允许 `PASS`）；
+- 输入校验：`mm_per_px` 非数值、分辨率非正、负 `tol` 一律报 `SpecError`；相机契约明确限制为 orthographic + `sensor_fit=AUTO` + square pixels + zero shift——不合规的 spec 直接拒绝，而不是算出一个看着合理的数；
 - 剪影：完全一致 / 1 px 内偏移 → `PASS`；宽行边界差 5 px → `FAIL`；≤6 px 窄区间的边界差 → `UNKNOWN`（亚像素归属，不判 `FAIL`）；单侧缺行 → `FAIL`；
-- 阶段守卫：目标不存在 → 放行；已存在且未授权 → 阻止且**不改动任何文件**；dry-run 不产生备份；两次授权覆盖依次得到 `_dev1` / `_dev2`；
-- CLI 契约：`PASS`→0、`FAIL`→1、spec 缺失→2、仅自检时不宣告 `PASS`。
+- 剪影的输入契约：**0 个有效比较行 → `UNKNOWN`**（禁止空证据 `PASS`）；A/B 两侧 `width` 不一致拒绝比较；非法 row range / 负 `tol` / 负 `thin` 一律报 `InputError`；
+- 阶段守卫：目标不存在 → 放行；已存在且未授权 → 阻止且**不改动任何文件**；dry-run 不产生备份；两次授权覆盖依次得到 `_dev1` / `_dev2`；**授权覆盖时先用 `copy2` 备份旧主产物而不是 `rename`**，所以后续 Blender 保存失败时主产物仍在；把目录当目标会被 `ValueError` 拒绝；
+- CLI 契约：`PASS`→0、`FAIL` / `UNKNOWN`→1、输入错误（missing spec / 非法 row range）→2。
 
-未验证范围：脚本未在 macOS / Linux 上跑过（只用 `pathlib` 与标准库，理论上可移植）；`silhouette_diff.py`
-不直接解析 PNG，掩膜到行区间的转换需要调用方提供（见 `docs/04` 的 B-09）。
+验证环境：`.github/workflows/selftest.yml` 在 Windows / Linux / macOS 与 Python 3.10–3.13（12 个矩阵任务）上运行 `tools/selftest.py`。
+未覆盖：`silhouette_diff.py` 不直接解析 PNG，掩膜到行区间的转换需要调用方提供（见 `docs/04` 的 B-09）。
 
 ## 6. 适用与不适用
 
