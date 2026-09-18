@@ -24,3 +24,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Run self tests
         run: python tools/selftest.py
+        env:
+          # Windows runners default Python stdio to the system code page (cp1252),
+          # which cannot encode the Chinese labels printed by selftest.py
+          # (UnicodeEncodeError on all windows-latest jobs, run 35302132521).
+          PYTHONUTF8: "1"
